@@ -3,3 +3,5 @@
 .layer{position:relative}.layer[draggable=true]{cursor:grab}.layer.dragging{opacity:.4}.layer-grip{color:#b6b5bf;font-size:15px;line-height:1}.layer.drop-before:before,.layer.drop-after:after{content:"";position:absolute;left:6px;right:6px;height:2px;background:#6955e9;border-radius:2px}.layer.drop-before:before{top:0}.layer.drop-after:after{bottom:0}.layer:focus-visible{outline:2px solid #6955e9;outline-offset:-2px}
 
 .fill-toggle{display:flex;align-items:center;gap:8px;margin:14px 0;color:#777783;font-size:11px}.fill-toggle input{accent-color:#705be9}.stroke-title{font-size:11px;font-weight:650;margin:14px 0 9px}
+
+.recognition-hint{color:#9999a6;font-size:10px;line-height:1.5;margin:8px 0 12px}.section .secondary{font-size:11px}.section .field-label select{cursor:pointer}
