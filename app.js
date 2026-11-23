@@ -13,10 +13,32 @@ function toast(s){$('toast').textContent=s;$('toast').classList.add('show');clea
 function fit(){if(!state.width)return;zoom=Math.min(1,(stage.clientWidth-64)/state.width,(stage.clientHeight-64)/state.height);zoom=Math.max(.05,zoom);size()}
 function size(){if(!state.width)return;wrap.style.width=state.width*zoom+'px';wrap.style.height=state.height*zoom+'px';$('zoomLabel').textContent=Math.round(zoom*100)+'%';renderOverlay()}
 function newBlock(x,y,w,h,name='Block',type='block'){return {id:crypto.randomUUID(),name,type,x:Math.round(x),y:Math.round(y),w:Math.round(w),h:Math.round(h),r:Math.round(Math.min(8,h/2)),color:state.defaultColor,fillEnabled:true,strokeWidth:0,strokeColor:state.defaultColor}}
+const linearChannel=Array.from({length:256},(_,i)=>{
+ const v=i/255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4;
+});
+function relativeLight(r,g,b){
+ return .2126*linearChannel[Math.round(r)]+.7152*linearChannel[Math.round(g)]+.0722*linearChannel[Math.round(b)];
+}
+function lightRatio(a,b){return (Math.max(a,b)+.05)/(Math.min(a,b)+.05)}
+function neutralHex(level){return '#'+level.toString(16).padStart(2,'0').repeat(3)}
 function analyse(image,detail='all'){
- const scale=Math.min(1,800/Math.max(image.width,image.height)), w=Math.max(1,Math.round(image.width*scale)),h=Math.max(1,Math.round(image.height*scale));let c=document.createElement('canvas');c.width=w;c.height=h;let g=c.getContext('2d',{willReadFrequently:true});g.drawImage(image,0,0,w,h);let d=g.getImageData(0,0,w,h).data;
- // Estimate the dominant background from a sample of the whole image.
- let bins=new Map();for(let y=0;y<h;y+=3)for(let x=0;x<w;x+=3){let i=(y*w+x)*4,k=[d[i]>>4,d[i+1]>>4,d[i+2]>>4].join(',');bins.set(k,(bins.get(k)||0)+1)}let bg=[...bins].sort((a,b)=>b[1]-a[1])[0][0].split(',').map(n=>+n*16+8);
+ const scale=Math.min(1,800/Math.max(image.width,image.height)), w=Math.max(1,Math.round(image.width*scale)),h=Math.max(1,Math.round(image.height*scale));let c=document.createElement('canvas');c.width=w;c.height=h;let g=c.getContext('2d',{willReadFrequently:true});g.fillStyle="#fff";g.fillRect(0,0,w,h);g.drawImage(image,0,0,w,h);let d=g.getImageData(0,0,w,h).data;
+ // Estimate the backdrop from area and perimeter support so a large inset card
+ // does not become the page background just because it contains more pixels.
+ const bins=new Map(), grayscale=new Float32Array(w*h);
+ for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+   const pixel=y*w+x,i=pixel*4;
+   grayscale[pixel]=relativeLight(d[i],d[i+1],d[i+2]);
+   const border=x===0||y===0||x===w-1||y===h-1;
+   if(!border&&(x%3||y%3))continue;
+   const key=(d[i]>>4)*256+(d[i+1]>>4)*16+(d[i+2]>>4);
+   const bin=bins.get(key)||{score:0,count:0,r:0,g:0,b:0};
+   bin.score+=border?1+w*h/(9*(w+h)):1;
+   bin.count++;bin.r+=d[i];bin.g+=d[i+1];bin.b+=d[i+2];bins.set(key,bin);
+ }
+ const backdrop=[...bins.values()].sort((a,b)=>b.score-a.score)[0];
+ const bg=[backdrop.r,backdrop.g,backdrop.b].map(sum=>sum/backdrop.count);
+ const backgroundLight=relativeLight(...bg);
  // Locate substantial uniform surfaces before foreground detection. They are
  // containers, so their interior is analysed against their own background colour.
  let surfaces=[],surfaceSeen=new Uint8Array(w*h),surfaceQueue=new Int32Array(w*h),colorKey=p=>{let i=p*4;return (d[i]>>3)*1024+(d[i+1]>>3)*32+(d[i+2]>>3)};
@@ -25,7 +47,7 @@ function analyse(image,detail='all'){
  // locally consistent, high-contrast extremes in those regions (e.g. text over a photo).
  let tileSize=24,cols=Math.ceil(w/tileSize),rows=Math.ceil(h/tileSize),tiles=[];
  for(let ty=0;ty<rows;ty++)for(let tx=0;tx<cols;tx++){let x0=tx*tileSize,y0=ty*tileSize,x1=Math.min(w,x0+tileSize),y1=Math.min(h,y0+tileSize),colors=new Set(),sum=0,sumSq=0,n=0,changes=0,comparisons=0;for(let y=y0;y<y1;y+=2)for(let x=x0;x<x1;x+=2){let i=(y*w+x)*4,l=(d[i]*77+d[i+1]*150+d[i+2]*29)/256;sum+=l;sumSq+=l*l;n++;colors.add((d[i]>>5)*64+(d[i+1]>>5)*8+(d[i+2]>>5));if(x+2<x1){let j=i+8,delta=Math.abs(d[i]-d[j])+Math.abs(d[i+1]-d[j+1])+Math.abs(d[i+2]-d[j+2]);if(delta>18&&delta<270)changes++;comparisons++}}let mean=sum/n,sd=Math.sqrt(Math.max(0,sumSq/n-mean*mean));tiles.push({photo:colors.size>=10&&sd>14&&changes/Math.max(1,comparisons)>.65,mean})}
- let mask=new Uint8Array(w*h);for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){let i=(y*w+x)*4,tile=tiles[Math.floor(y/tileSize)*cols+Math.floor(x/tileSize)],diff=Math.abs(d[i]-bg[0])+Math.abs(d[i+1]-bg[1])+Math.abs(d[i+2]-bg[2]);if(d[i+3]<=40)continue;if(!tile.photo){if(diff>95)mask[y*w+x]=1;continue}let lum=(d[i]*77+d[i+1]*150+d[i+2]*29)/256;if(Math.abs(lum-tile.mean)<75)continue;let similar=0;for(let delta of [-4,4,-w*4,w*4])if(Math.abs(d[i]-d[i+delta])+Math.abs(d[i+1]-d[i+delta+1])+Math.abs(d[i+2]-d[i+delta+2])<45)similar++;if(similar>=2)mask[y*w+x]=1}
+ let mask=new Uint8Array(w*h);for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){let i=(y*w+x)*4,tile=tiles[Math.floor(y/tileSize)*cols+Math.floor(x/tileSize)],diff=Math.abs(d[i]-bg[0])+Math.abs(d[i+1]-bg[1])+Math.abs(d[i+2]-bg[2]);if(d[i+3]<=40)continue;if(!tile.photo){if(diff>95||lightRatio(grayscale[y*w+x],backgroundLight)>1.22)mask[y*w+x]=1;continue}let lum=(d[i]*77+d[i+1]*150+d[i+2]*29)/256;if(Math.abs(lum-tile.mean)<75)continue;let similar=0;for(let delta of [-4,4,-w*4,w*4])if(Math.abs(d[i]-d[i+delta])+Math.abs(d[i+1]-d[i+delta+1])+Math.abs(d[i+2]-d[i+delta+2])<45)similar++;if(similar>=2)mask[y*w+x]=1}
  // Replace the container's fill in the foreground mask with its local contents.
  for(let surface of surfaces){let {x0,y0,x1,y1,base,radius}=surface;for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){let dx=Math.max(x0+radius-x,0,x-(x1-radius)),dy=Math.max(y0+radius-y,0,y-(y1-radius));if(x-x0<3||x1-x<3||y-y0<3||y1-y<3||dx*dx+dy*dy>radius*radius){mask[y*w+x]=0;continue}let i=(y*w+x)*4,diff=Math.abs(d[i]-base[0])+Math.abs(d[i+1]-base[1])+Math.abs(d[i+2]-base[2]);mask[y*w+x]=d[i+3]>40&&diff>24?1:0}}
  // Find connected rectangular outlines before joining nearby text and icons.
@@ -54,12 +76,40 @@ function analyse(image,detail='all'){
  // Join nearby fragments on the same line inside a filled card (e.g. date and month).
  for(let surface of surfaces){let c=surface.b,changed=true;while(changed){changed=false;let inside=out.filter(b=>b!==c&&b.type!=='card'&&b.type!=='outline'&&b.type!=='image'&&b.x>c.x&&b.x+b.w<c.x+c.w&&b.y>c.y&&b.y+b.h<c.y+c.h).sort((a,b)=>a.x-b.x);outer:for(let i=0;i<inside.length;i++)for(let j=i+1;j<inside.length;j++){let a=inside[i],b=inside[j],gap=b.x-(a.x+a.w),overlap=Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y);if(gap<0||gap>Math.max(a.h,b.h)*.6||overlap<Math.min(a.h,b.h)*.7||a.w/a.h<1||b.w/b.h<1)continue;let y=Math.min(a.y,b.y),bottom=Math.max(a.y+a.h,b.y+b.h);a.w=b.x+b.w-a.x;a.y=y;a.h=bottom-y;a.type='text';a.r=Math.round(a.h/2);out.splice(out.indexOf(b),1);changed=true;break outer}}}
  out.sort((a,b)=>a.y-b.y||a.x-b.x);if(detail==='essential')out=simplifyBlocks(out,w/scale,h/scale);out=harmonizeCards(out);normalizeNavigationIcons(out,image.width,image.height);
- // Derive neutral levels from WCAG relative luminance and containment depth.
- // Skeleton placeholders are decorative; these ratios are not a WCAG compliance claim.
- let lin=v=>{v=v/255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4},lum=rgb=>.2126*lin(rgb[0])+.7152*lin(rgb[1])+.0722*lin(rgb[2]),gray=v=>{v=clamp(Math.round(v),0,255);let h=v.toString(16).padStart(2,'0');return '#'+h+h+h},level=c=>parseInt(c.slice(1,3),16),contrast=(a,b)=>(Math.max(lin(a),lin(b))+.05)/(Math.min(lin(a),lin(b))+.05),lighter=(base,target,ratio)=>{let v=clamp(Math.max(base+1,target),0,255);while(v<255&&contrast(base,v)<ratio)v++;return v};
- let bgLevel=Math.round(188+lum(bg)*24);state.background=gray(bgLevel);let cards=out.filter(b=>b.type==='card').sort((a,b)=>b.w*b.h-a.w*a.h),contains=(a,b)=>b.x+b.w/2>a.x&&b.x+b.w/2<a.x+a.w&&b.y+b.h/2>a.y&&b.y+b.h/2<a.y+a.h&&a.w*a.h>b.w*b.h;
- for(let b of cards){let parent=cards.filter(c=>c!==b&&contains(c,b)).sort((a,b)=>a.w*a.h-b.w*b.h)[0],base=parent?level(parent.color):bgLevel,surface=surfaces.find(x=>x.b.id===b.id),tone=surface?lum(surface.base):.5;b.color=gray(lighter(base,base+12+tone*5,1.10))}
- for(let b of out){if(b.type==='card')continue;let parent=cards.filter(c=>contains(c,b)).sort((a,b)=>a.w*a.h-b.w*b.h)[0],base=parent?level(parent.color):bgLevel,v=lighter(base,base+18,1.12);b.color=gray(v);if(b.strokeWidth)b.strokeColor=gray(v)}
+ const lightPage=backgroundLight>=.179;
+ const bgLevel=lightPage?Math.round(229+21*backgroundLight):Math.round(29+70*backgroundLight);
+ state.background=neutralHex(bgLevel);
+ const cards=out.filter(b=>b.type==='card').sort((a,b)=>b.w*b.h-a.w*a.h);
+ const contains=(a,b)=>a.w*a.h>b.w*b.h&&b.x+b.w/2>a.x&&b.x+b.w/2<a.x+a.w&&b.y+b.h/2>a.y&&b.y+b.h/2<a.y+a.h;
+ const surfaceLight=new Map(surfaces.map(s=>[s.b.id,relativeLight(...s.base)]));
+ const smallestFirst=[...cards].reverse();
+ for(const block of [...cards,...out.filter(b=>b.type!=='card')]){
+   const parent=smallestFirst.find(card=>contains(card,block));
+   const base=parent?parseInt(parent.color.slice(1,3),16):bgLevel;
+   const localLight=surfaceLight.get(parent?.id)??backgroundLight;
+   let ratio;
+   if(surfaceLight.has(block.id))ratio=lightRatio(localLight,surfaceLight.get(block.id));
+   else{
+     // Ignore whitespace inside text bounds. Include edge pixels for hollow outlines.
+     const ratios=[];
+     const left=clamp(Math.floor(block.x*scale),0,w),right=Math.min(w,Math.ceil((block.x+block.w)*scale));
+     const top=clamp(Math.floor(block.y*scale),0,h),bottom=Math.min(h,Math.ceil((block.y+block.h)*scale));
+     const step=Math.max(1,Math.floor(Math.sqrt((right-left)*(bottom-top)/1800)));
+     for(let y=top;y<bottom;y+=step)for(let x=left;x<right;x+=step){
+       const pixel=y*w+x,r=lightRatio(grayscale[pixel],localLight);
+       if(r>1.04&&(mask[pixel]||block.type==='outline'))ratios.push(r);
+     }
+     ratios.sort((a,b)=>a-b);
+     ratio=ratios[Math.floor(ratios.length*.7)]??1;
+   }
+   const strength=Math.log(ratio)/Math.log(21);
+   const distance=block.type==='card'?13+28*strength:17+44*strength;
+   // Keep headroom on deeply nested cards on either background.
+   const room=lightPage?base:255-base;
+   const delta=Math.min(Math.round(distance),Math.ceil(room*.45));
+   block.color=neutralHex(base+(lightPage?-delta:delta));
+   if(block.strokeWidth)block.strokeColor=block.color;
+ }
  // Draw each container before its children regardless of their top edges.
  out.sort((a,b)=>contains(a,b)?-1:contains(b,a)?1:(a.y-b.y||a.x-b.x));return out.slice(0,300).map((b,i)=>({...b,name:(b.type==='text'?'Text':b.type==='image'?'Image':b.type==='outline'?'Outline':b.type==='card'?'Card':'Block')+' '+(i+1)}));
 }
