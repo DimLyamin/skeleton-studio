@@ -38,22 +38,31 @@ function measureRules(image){
      const along=vertical?width*4:4,across=vertical?4:width*4;
      const diff=(a,b)=>Math.max(Math.abs(pixels[a]-pixels[b]),Math.abs(pixels[a+1]-pixels[b+1]),Math.abs(pixels[a+2]-pixels[b+2]));
      for(let row=1;row<=band&&row<span-1;row++){
-       let start=0,thickness=0;
+       let start=0,thickness=0,inkWidth=0,inkOffset=0;
        for(let x=0;x<=length;x++){
          const i=row*across+x*along;
-         let n=0;
+         let n=0,widthPx=0,offset=0;
          if(x<length&&diff(i,i-across)>=8){
-           let k=1;
-           while(k<=3&&row+k<span&&diff(i,i+k*across)<=4)k++;
-           if(k<=3&&row+k<span&&diff(i-across,i+k*across)<=5)n=k;
+           const bg=i-across;
+           let k=0,peak=0,total=0,moment=0;
+           while(k<3&&row+k<span&&diff(bg,i+k*across)>5){
+             const weight=diff(bg,i+k*across);
+             peak=Math.max(peak,weight);total+=weight;moment+=k*weight;k++;
+           }
+           if(k&&row+k<span&&diff(bg,i+k*across)<=5){
+             n=k;
+             // A fractional-pixel stroke can cover two columns with unequal intensity.
+             widthPx=Math.max(1,Math.round(total/peak));
+             offset=Math.round(moment/total-(widthPx-1)/2);
+           }
          }
-         if(n===thickness&&(!n||diff(i,row*across+start*along)<=6))continue;
+         if(n===thickness&&widthPx===inkWidth&&offset===inkOffset&&(!n||diff(i,row*across+start*along)<=6))continue;
          const run=x-start,pos=first+row-1;
          if(thickness&&run>=Math.max(10,6*thickness)){
-           const b=vertical?newBlock(pos,start,thickness,run,'','line'):newBlock(start,pos,run,thickness,'','line');
+           const b=vertical?newBlock(pos+inkOffset,start,inkWidth,run,'','line'):newBlock(start,pos+inkOffset,run,inkWidth,'','line');
            b.r=0;rules.push(b);
          }
-         start=x;thickness=n;
+         start=x;thickness=n;inkOffset=offset;inkWidth=widthPx;
        }
      }
    }
@@ -81,7 +90,7 @@ function analyse(image,detail='all'){
  // Locate substantial uniform surfaces before foreground detection. They are
  // containers, so their interior is analysed against their own background colour.
  let surfaces=[],surfaceSeen=new Uint8Array(w*h),surfaceQueue=new Int32Array(w*h),colorKey=p=>{let i=p*4;return (d[i]>>3)*1024+(d[i+1]>>3)*32+(d[i+2]>>3)};
- for(let p=0;p<w*h;p++){if(surfaceSeen[p]||d[p*4+3]<200)continue;let key=colorKey(p),head=0,tail=0,x0=w,y0=h,x1=0,y1=0,sr=0,sg=0,sb=0;surfaceQueue[tail++]=p;surfaceSeen[p]=1;while(head<tail){let n=surfaceQueue[head++],x=n%w,y=(n/w)|0,i=n*4;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);sr+=d[i];sg+=d[i+1];sb+=d[i+2];for(let z of [n-1,n+1,n-w,n+w]){if(z<0||z>=w*h||surfaceSeen[z]||Math.abs(z%w-x)+Math.abs(((z/w)|0)-y)!==1||d[z*4+3]<200||colorKey(z)!==key)continue;surfaceSeen[z]=1;surfaceQueue[tail++]=z}}let bw=x1-x0+1,bh=y1-y0+1,area=bw*bh;if(bw<48||bh<18||area<w*h*.003||area>w*h*.9||tail/area<.65)continue;let base=[sr/tail,sg/tail,sb/tail];let backgroundDiff=Math.abs(base[0]-bg[0])+Math.abs(base[1]-bg[1])+Math.abs(base[2]-bg[2]);if(backgroundDiff<35){let count=0,distinct=0;for(let k=0;k<16;k++){let x=Math.round(x0+(x1-x0)*(k+.5)/16),y=Math.round(y0+(y1-y0)*(k+.5)/16);for(let [xx,yy] of [[x,y0-Math.min(5,y0)],[x,y1+Math.min(5,h-1-y1)],[x0-Math.min(5,x0),y],[x1+Math.min(5,w-1-x1),y]]){if(xx<0||xx>=w||yy<0||yy>=h||(xx>=x0&&xx<=x1&&yy>=y0&&yy<=y1))continue;let i=(yy*w+xx)*4;count++;let delta=Math.abs(d[i]-base[0])+Math.abs(d[i+1]-base[1])+Math.abs(d[i+2]-base[2]);let fx=xx<x0?Math.max(0,x0-10):xx>x1?Math.min(w-1,x1+10):xx,fy=yy<y0?Math.max(0,y0-10):yy>y1?Math.min(h-1,y1+10):yy,fi=(fy*w+fx)*4,farDiff=Math.abs(d[fi]-base[0])+Math.abs(d[fi+1]-base[1])+Math.abs(d[fi+2]-base[2]);if(delta>15&&(delta<100||farDiff>15))distinct++}}if(count<12||distinct/count<.65)continue}let topStart=x0;while(topStart<=x1&&colorKey(y0*w+topStart)!==key)topStart++;let radius=clamp(topStart-x0,0,Math.min(bw,bh)/2);if(radius>Math.min(bw,bh)*.32)continue;let b=newBlock(x0/scale,y0/scale,bw/scale,bh/scale,'Card','card');let color=state.defaultColor.match(/[0-9a-f]{2}/gi).map(v=>Math.round(255-(255-parseInt(v,16))*.75));b.color='#'+color.map(v=>v.toString(16).padStart(2,'0')).join('');b.r=Math.round(radius/scale);surfaces.push({x0,y0,x1,y1,base,radius,b})}
+ for(let p=0;p<w*h;p++){if(surfaceSeen[p]||d[p*4+3]<200)continue;let key=colorKey(p),head=0,tail=0,x0=w,y0=h,x1=0,y1=0,sr=0,sg=0,sb=0;surfaceQueue[tail++]=p;surfaceSeen[p]=1;while(head<tail){let n=surfaceQueue[head++],x=n%w,y=(n/w)|0,i=n*4;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);sr+=d[i];sg+=d[i+1];sb+=d[i+2];for(let z of [n-1,n+1,n-w,n+w]){if(z<0||z>=w*h||surfaceSeen[z]||Math.abs(z%w-x)+Math.abs(((z/w)|0)-y)!==1||d[z*4+3]<200||colorKey(z)!==key)continue;surfaceSeen[z]=1;surfaceQueue[tail++]=z}}let bw=x1-x0+1,bh=y1-y0+1,area=bw*bh;if(bw<48||bh<18||area<w*h*.003||area>w*h*.9||tail/area<.65)continue;let base=[sr/tail,sg/tail,sb/tail];let backgroundDiff=Math.abs(base[0]-bg[0])+Math.abs(base[1]-bg[1])+Math.abs(base[2]-bg[2]);if(backgroundDiff<35){if((x0===0&&x1===w-1&&bh>h*.25)||(y0===0&&y1===h-1&&bw>w*.35))continue;let count=0,distinct=0;for(let k=0;k<16;k++){let x=Math.round(x0+(x1-x0)*(k+.5)/16),y=Math.round(y0+(y1-y0)*(k+.5)/16);for(let [xx,yy] of [[x,y0-Math.min(5,y0)],[x,y1+Math.min(5,h-1-y1)],[x0-Math.min(5,x0),y],[x1+Math.min(5,w-1-x1),y]]){if(xx<0||xx>=w||yy<0||yy>=h||(xx>=x0&&xx<=x1&&yy>=y0&&yy<=y1))continue;let i=(yy*w+xx)*4;count++;let delta=Math.abs(d[i]-base[0])+Math.abs(d[i+1]-base[1])+Math.abs(d[i+2]-base[2]);let fx=xx<x0?Math.max(0,x0-10):xx>x1?Math.min(w-1,x1+10):xx,fy=yy<y0?Math.max(0,y0-10):yy>y1?Math.min(h-1,y1+10):yy,fi=(fy*w+fx)*4,farDiff=Math.abs(d[fi]-base[0])+Math.abs(d[fi+1]-base[1])+Math.abs(d[fi+2]-base[2]);if(delta>15&&(delta<100||farDiff>15))distinct++}}if(count<12||distinct/count<.65)continue}let topStart=x0;while(topStart<=x1&&colorKey(y0*w+topStart)!==key)topStart++;let radius=clamp(topStart-x0,0,Math.min(bw,bh)/2);if(radius>Math.min(bw,bh)*.32)continue;let b=newBlock(x0/scale,y0/scale,bw/scale,bh/scale,'Card','card');let color=state.defaultColor.match(/[0-9a-f]{2}/gi).map(v=>Math.round(255-(255-parseInt(v,16))*.75));b.color='#'+color.map(v=>v.toString(16).padStart(2,'0')).join('');b.r=Math.round(radius/scale);surfaces.push({x0,y0,x1,y1,base,radius,b})}
  // Detect photograph-like tiles by colour diversity and mid-frequency texture. Keep only
  // locally consistent, high-contrast extremes in those regions (e.g. text over a photo).
  let tileSize=24,cols=Math.ceil(w/tileSize),rows=Math.ceil(h/tileSize),tiles=[];
@@ -104,8 +113,11 @@ function analyse(image,detail='all'){
      Math.min(Math.abs(line.x-b.x),Math.abs(line.x+line.w-b.x-b.w))<tolerance;
  }));
  for(const line of rules){
-   const right=Math.min(w,Math.ceil((line.x+line.w)*scale)),bottom=Math.min(h,Math.ceil((line.y+line.h)*scale));
-   for(let y=Math.floor(line.y*scale);y<bottom;y++)mask.fill(0,y*w+Math.floor(line.x*scale),y*w+right);
+   const vertical=line.h>line.w,padX=vertical?1:0,padY=vertical?0:1;
+   const sx=w/image.width,sy=h/image.height;
+   const left=Math.max(0,Math.floor(line.x*sx)-padX),right=Math.min(w,Math.ceil((line.x+line.w)*sx)+padX);
+   const top=Math.max(0,Math.floor(line.y*sy)-padY),bottom=Math.min(h,Math.ceil((line.y+line.h)*sy)+padY);
+   for(let y=top;y<bottom;y++)mask.fill(0,y*w+left,y*w+right);
  }
  // Horizontal dilation joins individual glyphs into lines; vertical dilation joins small gaps.
  let dil=new Uint8Array(w*h),rx=Math.max(2,Math.round(5*scale)),ry=Math.max(1,Math.round(1*scale));for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(mask[y*w+x])for(let yy=Math.max(0,y-ry);yy<=Math.min(h-1,y+ry);yy++)for(let xx=Math.max(0,x-rx);xx<=Math.min(w-1,x+rx);xx++)dil[yy*w+xx]=1;
