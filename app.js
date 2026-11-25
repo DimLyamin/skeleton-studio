@@ -89,8 +89,28 @@ function analyse(image,detail='all'){
  const backgroundLight=relativeLight(...bg);
  // Locate substantial uniform surfaces before foreground detection. They are
  // containers, so their interior is analysed against their own background colour.
- let surfaces=[],surfaceSeen=new Uint8Array(w*h),surfaceQueue=new Int32Array(w*h),colorKey=p=>{let i=p*4;return (d[i]>>3)*1024+(d[i+1]>>3)*32+(d[i+2]>>3)};
- for(let p=0;p<w*h;p++){if(surfaceSeen[p]||d[p*4+3]<200)continue;let key=colorKey(p),head=0,tail=0,x0=w,y0=h,x1=0,y1=0,sr=0,sg=0,sb=0;surfaceQueue[tail++]=p;surfaceSeen[p]=1;while(head<tail){let n=surfaceQueue[head++],x=n%w,y=(n/w)|0,i=n*4;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);sr+=d[i];sg+=d[i+1];sb+=d[i+2];for(let z of [n-1,n+1,n-w,n+w]){if(z<0||z>=w*h||surfaceSeen[z]||Math.abs(z%w-x)+Math.abs(((z/w)|0)-y)!==1||d[z*4+3]<200||colorKey(z)!==key)continue;surfaceSeen[z]=1;surfaceQueue[tail++]=z}}let bw=x1-x0+1,bh=y1-y0+1,area=bw*bh;if(bw<48||bh<18||area<w*h*.003||area>w*h*.9||tail/area<.65)continue;let base=[sr/tail,sg/tail,sb/tail];let backgroundDiff=Math.abs(base[0]-bg[0])+Math.abs(base[1]-bg[1])+Math.abs(base[2]-bg[2]);if(backgroundDiff<35){if((x0===0&&x1===w-1&&bh>h*.25)||(y0===0&&y1===h-1&&bw>w*.35))continue;let count=0,distinct=0;for(let k=0;k<16;k++){let x=Math.round(x0+(x1-x0)*(k+.5)/16),y=Math.round(y0+(y1-y0)*(k+.5)/16);for(let [xx,yy] of [[x,y0-Math.min(5,y0)],[x,y1+Math.min(5,h-1-y1)],[x0-Math.min(5,x0),y],[x1+Math.min(5,w-1-x1),y]]){if(xx<0||xx>=w||yy<0||yy>=h||(xx>=x0&&xx<=x1&&yy>=y0&&yy<=y1))continue;let i=(yy*w+xx)*4;count++;let delta=Math.abs(d[i]-base[0])+Math.abs(d[i+1]-base[1])+Math.abs(d[i+2]-base[2]);let fx=xx<x0?Math.max(0,x0-10):xx>x1?Math.min(w-1,x1+10):xx,fy=yy<y0?Math.max(0,y0-10):yy>y1?Math.min(h-1,y1+10):yy,fi=(fy*w+fx)*4,farDiff=Math.abs(d[fi]-base[0])+Math.abs(d[fi+1]-base[1])+Math.abs(d[fi+2]-base[2]);if(delta>15&&(delta<100||farDiff>15))distinct++}}if(count<12||distinct/count<.65)continue}let topStart=x0;while(topStart<=x1&&colorKey(y0*w+topStart)!==key)topStart++;let radius=clamp(topStart-x0,0,Math.min(bw,bh)/2);if(radius>Math.min(bw,bh)*.32)continue;let b=newBlock(x0/scale,y0/scale,bw/scale,bh/scale,'Card','card');let color=state.defaultColor.match(/[0-9a-f]{2}/gi).map(v=>Math.round(255-(255-parseInt(v,16))*.75));b.color='#'+color.map(v=>v.toString(16).padStart(2,'0')).join('');b.r=Math.round(radius/scale);surfaces.push({x0,y0,x1,y1,base,radius,b})}
+ let surfaces=[],iconTiles=[],surfaceSeen=new Uint8Array(w*h),surfaceQueue=new Int32Array(w*h),colorKey=p=>{let i=p*4;return (d[i]>>3)*1024+(d[i+1]>>3)*32+(d[i+2]>>3)};
+ for(let p=0;p<w*h;p++){if(surfaceSeen[p]||d[p*4+3]<200)continue;let key=colorKey(p),head=0,tail=0,x0=w,y0=h,x1=0,y1=0,sr=0,sg=0,sb=0;surfaceQueue[tail++]=p;surfaceSeen[p]=1;while(head<tail){let n=surfaceQueue[head++],x=n%w,y=(n/w)|0,i=n*4;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);sr+=d[i];sg+=d[i+1];sb+=d[i+2];for(let z of [n-1,n+1,n-w,n+w]){if(z<0||z>=w*h||surfaceSeen[z]||Math.abs(z%w-x)+Math.abs(((z/w)|0)-y)!==1||d[z*4+3]<200||colorKey(z)!==key)continue;surfaceSeen[z]=1;surfaceQueue[tail++]=z}}let bw=x1-x0+1,bh=y1-y0+1,area=bw*bh;
+   if(tail/area<.65)continue;
+   const base=[sr/tail,sg/tail,sb/tail];
+   // A small square with its own background is one icon tile. Detect it
+   // at the analysis scale before the icon and text can be joined.
+   if(Math.min(bw,bh)>=Math.max(7,18*scale)&&Math.max(bw,bh)<=84*scale&&Math.min(bw,bh)/Math.max(bw,bh)>=.84
+      &&x0>=2&&y0>=2&&x1<w-2&&y1<h-2){
+     const cx=Math.round((x0+x1)/2),cy=Math.round((y0+y1)/2);
+     const outside=[[x0-2,cy],[x1+2,cy],[cx,y0-2],[cx,y1+2]];
+     const changes=outside.map(([x,y])=>base.reduce((sum,channel,c)=>sum+Math.abs(channel-d[(y*w+x)*4+c]),0));
+     if(changes.every(delta=>delta>=16)){
+       let corner=x0;
+       while(corner<=x1&&colorKey(y0*w+corner)!==key)corner++;
+       const block=newBlock(x0/scale,y0/scale,bw/scale,bh/scale,'','image');
+       block.r=Math.round(clamp(corner-x0,0,Math.min(bw,bh)/2)/scale);
+       iconTiles.push({x0,y0,x1,y1,base,b:block});
+       continue;
+     }
+   }
+   if(bw<48||bh<18||area<w*h*.003||area>w*h*.9)continue;
+   let backgroundDiff=Math.abs(base[0]-bg[0])+Math.abs(base[1]-bg[1])+Math.abs(base[2]-bg[2]);if(backgroundDiff<35){if((x0===0&&x1===w-1&&bh>h*.25)||(y0===0&&y1===h-1&&bw>w*.35))continue;let count=0,distinct=0;for(let k=0;k<16;k++){let x=Math.round(x0+(x1-x0)*(k+.5)/16),y=Math.round(y0+(y1-y0)*(k+.5)/16);for(let [xx,yy] of [[x,y0-Math.min(5,y0)],[x,y1+Math.min(5,h-1-y1)],[x0-Math.min(5,x0),y],[x1+Math.min(5,w-1-x1),y]]){if(xx<0||xx>=w||yy<0||yy>=h||(xx>=x0&&xx<=x1&&yy>=y0&&yy<=y1))continue;let i=(yy*w+xx)*4;count++;let delta=Math.abs(d[i]-base[0])+Math.abs(d[i+1]-base[1])+Math.abs(d[i+2]-base[2]);let fx=xx<x0?Math.max(0,x0-10):xx>x1?Math.min(w-1,x1+10):xx,fy=yy<y0?Math.max(0,y0-10):yy>y1?Math.min(h-1,y1+10):yy,fi=(fy*w+fx)*4,farDiff=Math.abs(d[fi]-base[0])+Math.abs(d[fi+1]-base[1])+Math.abs(d[fi+2]-base[2]);if(delta>15&&(delta<100||farDiff>15))distinct++}}if(count<12||distinct/count<.65)continue}let topStart=x0;while(topStart<=x1&&colorKey(y0*w+topStart)!==key)topStart++;let radius=clamp(topStart-x0,0,Math.min(bw,bh)/2);if(radius>Math.min(bw,bh)*.32)continue;let b=newBlock(x0/scale,y0/scale,bw/scale,bh/scale,'Card','card');let color=state.defaultColor.match(/[0-9a-f]{2}/gi).map(v=>Math.round(255-(255-parseInt(v,16))*.75));b.color='#'+color.map(v=>v.toString(16).padStart(2,'0')).join('');b.r=Math.round(radius/scale);surfaces.push({x0,y0,x1,y1,base,radius,b})}
  // Detect photograph-like tiles by colour diversity and mid-frequency texture. Keep only
  // locally consistent, high-contrast extremes in those regions (e.g. text over a photo).
  let tileSize=24,cols=Math.ceil(w/tileSize),rows=Math.ceil(h/tileSize),tiles=[];
@@ -98,6 +118,12 @@ function analyse(image,detail='all'){
  let mask=new Uint8Array(w*h);for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){let i=(y*w+x)*4,tile=tiles[Math.floor(y/tileSize)*cols+Math.floor(x/tileSize)],diff=Math.abs(d[i]-bg[0])+Math.abs(d[i+1]-bg[1])+Math.abs(d[i+2]-bg[2]);if(d[i+3]<=40)continue;if(!tile.photo){if(diff>95||lightRatio(grayscale[y*w+x],backgroundLight)>1.22)mask[y*w+x]=1;continue}let lum=(d[i]*77+d[i+1]*150+d[i+2]*29)/256;if(Math.abs(lum-tile.mean)<75)continue;let similar=0;for(let delta of [-4,4,-w*4,w*4])if(Math.abs(d[i]-d[i+delta])+Math.abs(d[i+1]-d[i+delta+1])+Math.abs(d[i+2]-d[i+delta+2])<45)similar++;if(similar>=2)mask[y*w+x]=1}
  // Replace the container's fill in the foreground mask with its local contents.
  for(let surface of surfaces){let {x0,y0,x1,y1,base,radius}=surface;for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){let dx=Math.max(x0+radius-x,0,x-(x1-radius)),dy=Math.max(y0+radius-y,0,y-(y1-radius));if(x-x0<3||x1-x<3||y-y0<3||y1-y<3||dx*dx+dy*dy>radius*radius){mask[y*w+x]=0;continue}let i=(y*w+x)*4,diff=Math.abs(d[i]-base[0])+Math.abs(d[i+1]-base[1])+Math.abs(d[i+2]-base[2]);mask[y*w+x]=d[i+3]>40&&diff>24?1:0}}
+ // Include the soft edge around the tile so its corner pixels do not
+ // become separate layers after grouping the remaining mask.
+ for(const {x0,y0,x1,y1} of iconTiles){
+   const left=Math.max(0,x0-2),right=Math.min(w,x1+3);
+   for(let y=Math.max(0,y0-2);y<=Math.min(h-1,y1+2);y++)mask.fill(0,y*w+left,y*w+right);
+ }
  // Find connected rectangular outlines before joining nearby text and icons.
  // Removing just the border pixels lets the interior be segmented independently.
  let outlines=[],visited=new Uint8Array(w*h),queue=new Int32Array(w*h);
@@ -105,7 +131,9 @@ function analyse(image,detail='all'){
  // Outlines already carry their border. Keep standalone rules independent
  // of nearby labels by removing their footprint before glyph dilation.
  const borders=[...outlines,...surfaces.map(s=>s.b)];
- const rules=measureRules(image).filter(line=>!borders.some(b=>{
+ const rules=measureRules(image).filter(line=>!iconTiles.some(({b})=>
+   line.x>=b.x-1&&line.x+line.w<=b.x+b.w+1&&line.y>=b.y-1&&line.y+line.h<=b.y+b.h+1
+ )&&!borders.some(b=>{
    const horizontal=line.w>line.h,tolerance=2/scale;
    return horizontal?line.x>=b.x-tolerance&&line.x+line.w<=b.x+b.w+tolerance&&
      Math.min(Math.abs(line.y-b.y),Math.abs(line.y+line.h-b.y-b.h))<tolerance:
@@ -140,13 +168,28 @@ function analyse(image,detail='all'){
  out=out.filter(b=>b.type!=='block'||!surfaces.some(({b:c})=>{let r=c.r;if(!r||b.w>r||b.h>r)return false;let nearLeft=b.x-c.x<r,nearRight=c.x+c.w-(b.x+b.w)<r,nearTop=b.y-c.y<r,nearBottom=c.y+c.h-(b.y+b.h)<r;return (nearLeft||nearRight)&&(nearTop||nearBottom)}));
  // Join nearby fragments on the same line inside a filled card (e.g. date and month).
  for(let surface of surfaces){let c=surface.b,changed=true;while(changed){changed=false;let inside=out.filter(b=>b!==c&&b.type!=='card'&&b.type!=='outline'&&b.type!=='image'&&b.x>c.x&&b.x+b.w<c.x+c.w&&b.y>c.y&&b.y+b.h<c.y+c.h).sort((a,b)=>a.x-b.x);outer:for(let i=0;i<inside.length;i++)for(let j=i+1;j<inside.length;j++){let a=inside[i],b=inside[j],gap=b.x-(a.x+a.w),overlap=Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y);if(gap<0||gap>Math.max(a.h,b.h)*.6||overlap<Math.min(a.h,b.h)*.7||a.w/a.h<1||b.w/b.h<1)continue;let y=Math.min(a.y,b.y),bottom=Math.max(a.y+a.h,b.y+b.h);a.w=b.x+b.w-a.x;a.y=y;a.h=bottom-y;a.type='text';a.r=Math.round(a.h/2);out.splice(out.indexOf(b),1);changed=true;break outer}}}
- out.sort((a,b)=>a.y-b.y||a.x-b.x);if(detail==='essential')out=simplifyBlocks(out,w/scale,h/scale);out=harmonizeCards(out);normalizeNavigationIcons(out,image.width,image.height);out.push(...rules);
+  const isRowLabel=b=>b.type==='text'&&iconTiles.some(({b:tile})=>{
+   const gap=b.x-tile.x-tile.w,centerY=b.y+b.h/2;
+   return gap>=0&&gap<=tile.w&&centerY>=tile.y&&centerY<=tile.y+tile.h&&b.h<=tile.h*.45;
+ });
+ const rowLabels=out.filter(isRowLabel);
+ out.sort((a,b)=>a.y-b.y||a.x-b.x);
+ if(detail==='essential'){
+   const labels=new Set(rowLabels);
+   out=simplifyBlocks(out,w/scale,h/scale,labels);
+ }
+ out.push(...iconTiles.map(tile=>tile.b));
+ out=harmonizeCards(out);normalizeNavigationIcons(out,image.width,image.height);
+ out.push(...rules.filter(line=>!rowLabels.some(label=>
+   line.x>=label.x&&line.x+line.w<=label.x+label.w&&line.y>=label.y&&line.y+line.h<=label.y+label.h
+ )));
+
  const lightPage=backgroundLight>=.179;
  const bgLevel=lightPage?Math.round(229+21*backgroundLight):Math.round(29+70*backgroundLight);
  state.background=neutralHex(bgLevel);
  const cards=out.filter(b=>b.type==='card').sort((a,b)=>b.w*b.h-a.w*a.h);
  const contains=(a,b)=>a.w*a.h>b.w*b.h&&b.x+b.w/2>a.x&&b.x+b.w/2<a.x+a.w&&b.y+b.h/2>a.y&&b.y+b.h/2<a.y+a.h;
- const surfaceLight=new Map(surfaces.map(s=>[s.b.id,relativeLight(...s.base)]));
+ const surfaceLight=new Map([...surfaces,...iconTiles].map(s=>[s.b.id,relativeLight(...s.base)]));
  const smallestFirst=[...cards].reverse();
  for(const block of [...cards,...out.filter(b=>b.type!=='card')]){
    const parent=smallestFirst.find(card=>contains(card,block));
@@ -194,7 +237,7 @@ function harmonizeCards(blocks){
  return result;
 }
 // Prioritise the large, structural shapes and the first line of a close text group.
-function simplifyBlocks(blocks,width,height){let shortSide=Math.min(width,height),tiny=Math.max(5,shortSide*.018);return blocks.filter(b=>{if(b.type==='outline'||b.type==='card')return true;if(b.type==='block'&&Math.max(b.w,b.h)<tiny*1.8)return false;if(b.type!=='text'&&!(b.type==='block'&&b.w>b.h*2))return true;return !blocks.some(a=>{if(a===b||a.type!=='text'||a.y>=b.y)return false;let gap=b.y-(a.y+a.h),overlap=Math.max(0,Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x));return gap>=-2&&gap<=Math.max(a.h,b.h)*1.2&&overlap>=Math.min(a.w,b.w)*.45&&b.h<=a.h*1.65})})}
+function simplifyBlocks(blocks,width,height,keep){let shortSide=Math.min(width,height),tiny=Math.max(5,shortSide*.018);return blocks.filter(b=>{if(keep.has(b)||b.type==='outline'||b.type==='card')return true;if(b.type==='block'&&Math.max(b.w,b.h)<tiny*1.8)return false;if(b.type!=='text'&&!(b.type==='block'&&b.w>b.h*2))return true;return !blocks.some(a=>{if(a===b||a.type!=='text'||a.y>=b.y)return false;let gap=b.y-(a.y+a.h),overlap=Math.max(0,Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x));return gap>=-2&&gap<=Math.max(a.h,b.h)*1.2&&overlap>=Math.min(a.w,b.w)*.45&&b.h<=a.h*1.65})})}
 async function loadImage(file){if(!file||!['image/png','image/jpeg'].includes(file.type)){toast('Выберите PNG или JPG');return}try{let url=await new Promise((res,rej)=>{let r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file)});let image=await new Promise((res,rej)=>{let im=new Image();im.onload=()=>res(im);im.onerror=rej;im.src=url});snapshot();state.width=image.naturalWidth;state.height=image.naturalHeight;state.image=url;img=image;state.detail=$('detail').value;state.blocks=analyse(image,state.detail);selected=null;multi.clear();$('projectName').textContent=file.name.replace(/\.[^.]+$/,'');fit();renderUI();toast(`Найдено областей: ${state.blocks.length}. Можно исправить вручную.`)}catch(e){toast('Не удалось открыть изображение')}}
 let draggedLayer=null;
 function reorderLayer(id,targetId,before){
