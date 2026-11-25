@@ -69,7 +69,86 @@ function measureRules(image){
  }
  return rules;
 }
-function analyse(image,detail='all'){
+// Find rectangular surfaces from four aligned edges, even when the fill
+// cannot be isolated as one connected region of the same color.
+function findCardContours(pixels,width,height,scale,background,existing){
+ const minWidth=Math.max(24,Math.round(48*scale));
+ const minHeight=Math.max(18,Math.round(28*scale));
+ const color=(x,y)=>{
+   const offset=(y*width+x)*4;
+   return [pixels[offset],pixels[offset+1],pixels[offset+2]];
+ };
+ const difference=(a,b)=>Math.max(...a.map((value,i)=>Math.abs(value-b[i])));
+ function edges(vertical,minLength){
+   const length=vertical?height:width, breadth=vertical?width:height, runs=[];
+   const along=vertical?width*4:4, across=vertical?4:width*4;
+   for(let pos=1;pos<breadth;pos++){
+     let start=0,end=0,direction=0,count=0,strength=0;
+     for(let at=0;at<=length;at++){
+       const i=pos*across+at*along;
+       let delta=0;
+       if(at<length){
+         for(let channel=0;channel<3;channel++){
+           const value=pixels[i+channel]-pixels[i+channel-across];
+           if(Math.abs(value)>Math.abs(delta))delta=value;
+         }
+       }
+       const sign=Math.abs(delta)>=3?Math.sign(delta):0;
+       if(sign&&sign===direction&&at-end<=4){
+         end=at;count++;strength+=Math.abs(delta);
+       }else if(sign||at-end>4||at===length){
+         if(count>=minLength&&count/(end-start+1)>.8)runs.push({pos,start,end,strength:strength/count});
+         start=end=at;direction=sign;count=sign?1:0;strength=Math.abs(delta);
+       }
+     }
+   }
+   return runs.sort((a,b)=>b.strength-a.strength).slice(0,160);
+ }
+ const horizontal=edges(false,Math.ceil(minWidth*.7)).sort((a,b)=>a.pos-b.pos);
+ const vertical=edges(true,Math.ceil(minHeight*.7));
+ const candidates=[];
+ for(let i=0;i<horizontal.length;i++)for(let j=i+1;j<horizontal.length;j++){
+   const top=horizontal[i],bottom=horizontal[j],h=bottom.pos-top.pos;
+   if(h<minHeight)continue;
+   const innerWidth=Math.min(top.end,bottom.end)-Math.max(top.start,bottom.start)+1;
+   if(innerWidth<minWidth*.7)continue;
+   const corner=Math.min(24,Math.max(4,Math.round(Math.min(innerWidth,h)*.22)));
+   if(Math.abs(top.start-bottom.start)>corner||Math.abs(top.end-bottom.end)>corner)continue;
+   const matchSide=(edge,start)=>Math.abs(edge.start-top.pos)<=corner&&Math.abs(edge.end+1-bottom.pos)<=corner
+     &&Math.abs(edge.pos-start)<=corner&&(edge.end-edge.start+1)>=h*.7;
+   const left=vertical.find(edge=>matchSide(edge,Math.min(top.start,bottom.start)));
+   const right=vertical.find(edge=>matchSide(edge,Math.max(top.end,bottom.end)+1));
+   if(!left||!right)continue;
+   const x0=left.pos,x1=right.pos-1,y0=top.pos,y1=bottom.pos-1,w=x1-x0+1;
+   if(w<minWidth||Math.max(top.end,bottom.end)>x1+2||Math.min(top.start,bottom.start)<x0-2||w*h>width*height*.9)continue;
+   candidates.push({x0,y0,x1,y1,w,h,top,bottom,score:top.strength+bottom.strength+left.strength+right.strength});
+ }
+ const surfaces=[];
+ for(const candidate of candidates.sort((a,b)=>b.score-a.score)){
+   const {x0,y0,x1,y1,w,h,top,bottom}=candidate;
+   const nearby=other=>{
+     const overlapWidth=Math.max(0,Math.min(x1,other.x1)-Math.max(x0,other.x0)+1);
+     const overlapHeight=Math.max(0,Math.min(y1,other.y1)-Math.max(y0,other.y0)+1);
+     const overlap=overlapWidth*overlapHeight;
+     const otherArea=(other.x1-other.x0+1)*(other.y1-other.y0+1);
+     return overlap/(w*h+otherArea-overlap)>=.88;
+   };
+   if(existing.some(nearby)||surfaces.some(nearby))continue;
+   const samples=[];
+   for(let row=1;row<=5;row++)for(let col=1;col<=5;col++)
+     samples.push(color(x0+Math.floor(w*col/6),y0+Math.floor(h*row/6)));
+   const base=[0,1,2].map(channel=>samples.map(rgb=>rgb[channel]).sort((a,b)=>a-b)[12]);
+   if(samples.filter(rgb=>difference(rgb,base)<=10).length<17)continue;
+   const radius=clamp(Math.round((top.start-x0+x1-top.end+bottom.start-x0+x1-bottom.end)/4),0,Math.min(w,h)/4);
+   const b=newBlock(x0/scale,y0/scale,w/scale,h/scale,'Card','card');
+   b.r=Math.round(radius/scale);
+   if(difference(base,background)<=12){b.fillEnabled=false;b.strokeWidth=1}
+   surfaces.push({x0,y0,x1,y1,base,radius,b});
+   if(surfaces.length>=60)break;
+ }
+ return surfaces;
+}
+function analyse(image,detail='all',useContours=false){
  const scale=Math.min(1,800/Math.max(image.width,image.height)), w=Math.max(1,Math.round(image.width*scale)),h=Math.max(1,Math.round(image.height*scale));let c=document.createElement('canvas');c.width=w;c.height=h;let g=c.getContext('2d',{willReadFrequently:true});g.fillStyle="#fff";g.fillRect(0,0,w,h);g.drawImage(image,0,0,w,h);let d=g.getImageData(0,0,w,h).data;
  // Estimate the backdrop from area and perimeter support so a large inset card
  // does not become the page background just because it contains more pixels.
@@ -90,7 +169,11 @@ function analyse(image,detail='all'){
  // Locate substantial uniform surfaces before foreground detection. They are
  // containers, so their interior is analysed against their own background colour.
  let surfaces=[],surfaceSeen=new Uint8Array(w*h),surfaceQueue=new Int32Array(w*h),colorKey=p=>{let i=p*4;return (d[i]>>3)*1024+(d[i+1]>>3)*32+(d[i+2]>>3)};
- for(let p=0;p<w*h;p++){if(surfaceSeen[p]||d[p*4+3]<200)continue;let key=colorKey(p),head=0,tail=0,x0=w,y0=h,x1=0,y1=0,sr=0,sg=0,sb=0;surfaceQueue[tail++]=p;surfaceSeen[p]=1;while(head<tail){let n=surfaceQueue[head++],x=n%w,y=(n/w)|0,i=n*4;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);sr+=d[i];sg+=d[i+1];sb+=d[i+2];for(let z of [n-1,n+1,n-w,n+w]){if(z<0||z>=w*h||surfaceSeen[z]||Math.abs(z%w-x)+Math.abs(((z/w)|0)-y)!==1||d[z*4+3]<200||colorKey(z)!==key)continue;surfaceSeen[z]=1;surfaceQueue[tail++]=z}}let bw=x1-x0+1,bh=y1-y0+1,area=bw*bh;if(bw<48||bh<18||area<w*h*.003||area>w*h*.9||tail/area<.65)continue;let base=[sr/tail,sg/tail,sb/tail];let backgroundDiff=Math.abs(base[0]-bg[0])+Math.abs(base[1]-bg[1])+Math.abs(base[2]-bg[2]);if(backgroundDiff<35){if((x0===0&&x1===w-1&&bh>h*.25)||(y0===0&&y1===h-1&&bw>w*.35))continue;let count=0,distinct=0;for(let k=0;k<16;k++){let x=Math.round(x0+(x1-x0)*(k+.5)/16),y=Math.round(y0+(y1-y0)*(k+.5)/16);for(let [xx,yy] of [[x,y0-Math.min(5,y0)],[x,y1+Math.min(5,h-1-y1)],[x0-Math.min(5,x0),y],[x1+Math.min(5,w-1-x1),y]]){if(xx<0||xx>=w||yy<0||yy>=h||(xx>=x0&&xx<=x1&&yy>=y0&&yy<=y1))continue;let i=(yy*w+xx)*4;count++;let delta=Math.abs(d[i]-base[0])+Math.abs(d[i+1]-base[1])+Math.abs(d[i+2]-base[2]);let fx=xx<x0?Math.max(0,x0-10):xx>x1?Math.min(w-1,x1+10):xx,fy=yy<y0?Math.max(0,y0-10):yy>y1?Math.min(h-1,y1+10):yy,fi=(fy*w+fx)*4,farDiff=Math.abs(d[fi]-base[0])+Math.abs(d[fi+1]-base[1])+Math.abs(d[fi+2]-base[2]);if(delta>15&&(delta<100||farDiff>15))distinct++}}if(count<12||distinct/count<.65)continue}let topStart=x0;while(topStart<=x1&&colorKey(y0*w+topStart)!==key)topStart++;let radius=clamp(topStart-x0,0,Math.min(bw,bh)/2);if(radius>Math.min(bw,bh)*.32)continue;let b=newBlock(x0/scale,y0/scale,bw/scale,bh/scale,'Card','card');let color=state.defaultColor.match(/[0-9a-f]{2}/gi).map(v=>Math.round(255-(255-parseInt(v,16))*.75));b.color='#'+color.map(v=>v.toString(16).padStart(2,'0')).join('');b.r=Math.round(radius/scale);surfaces.push({x0,y0,x1,y1,base,radius,b})}
+ for(let p=0;p<w*h;p++){if(surfaceSeen[p]||d[p*4+3]<200)continue;let key=colorKey(p),head=0,tail=0,x0=w,y0=h,x1=0,y1=0,sr=0,sg=0,sb=0;surfaceQueue[tail++]=p;surfaceSeen[p]=1;while(head<tail){let n=surfaceQueue[head++],x=n%w,y=(n/w)|0,i=n*4;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);sr+=d[i];sg+=d[i+1];sb+=d[i+2];for(let z of [n-1,n+1,n-w,n+w]){if(z<0||z>=w*h||surfaceSeen[z]||Math.abs(z%w-x)+Math.abs(((z/w)|0)-y)!==1||d[z*4+3]<200||colorKey(z)!==key)continue;surfaceSeen[z]=1;surfaceQueue[tail++]=z}}let bw=x1-x0+1,bh=y1-y0+1,area=bw*bh;if(bw<48||bh<18||area<w*h*.003||area>w*h*.9||tail/area<.65)continue;let base=[sr/tail,sg/tail,sb/tail];let backgroundDiff=Math.abs(base[0]-bg[0])+Math.abs(base[1]-bg[1])+Math.abs(base[2]-bg[2]);if(backgroundDiff<35){if((x0===0&&x1===w-1&&bh>h*.25)||(y0===0&&y1===h-1&&bw>w*.35))continue;let count=0,distinct=0;for(let k=0;k<16;k++){let x=Math.round(x0+(x1-x0)*(k+.5)/16),y=Math.round(y0+(y1-y0)*(k+.5)/16);for(let [xx,yy] of [[x,y0-Math.min(5,y0)],[x,y1+Math.min(5,h-1-y1)],[x0-Math.min(5,x0),y],[x1+Math.min(5,w-1-x1),y]]){if(xx<0||xx>=w||yy<0||yy>=h||(xx>=x0&&xx<=x1&&yy>=y0&&yy<=y1))continue;let i=(yy*w+xx)*4;count++;let delta=Math.abs(d[i]-base[0])+Math.abs(d[i+1]-base[1])+Math.abs(d[i+2]-base[2]);let fx=xx<x0?Math.max(0,x0-10):xx>x1?Math.min(w-1,x1+10):xx,fy=yy<y0?Math.max(0,y0-10):yy>y1?Math.min(h-1,y1+10):yy,fi=(fy*w+fx)*4,farDiff=Math.abs(d[fi]-base[0])+Math.abs(d[fi+1]-base[1])+Math.abs(d[fi+2]-base[2]);if(delta>6&&(delta<100||farDiff>15))distinct++}}if(count<12||distinct/count<.65)continue}let topStart=x0;while(topStart<=x1&&colorKey(y0*w+topStart)!==key)topStart++;let radius=clamp(topStart-x0,0,Math.min(bw,bh)/2);if(radius>Math.min(bw,bh)*.32)continue;let b=newBlock(x0/scale,y0/scale,bw/scale,bh/scale,'Card','card');let color=state.defaultColor.match(/[0-9a-f]{2}/gi).map(v=>Math.round(255-(255-parseInt(v,16))*.75));b.color='#'+color.map(v=>v.toString(16).padStart(2,'0')).join('');b.r=Math.round(radius/scale);if(backgroundDiff<35){b.fillEnabled=false;b.strokeWidth=1;b.strokeColor=state.defaultColor}surfaces.push({x0,y0,x1,y1,base,radius,b})}
+ if(useContours){
+   surfaces.push(...findCardContours(d,w,h,scale,bg,surfaces));
+   surfaces.sort((a,b)=>(b.x1-b.x0)*(b.y1-b.y0)-(a.x1-a.x0)*(a.y1-a.y0));
+ }
  // Detect photograph-like tiles by colour diversity and mid-frequency texture. Keep only
  // locally consistent, high-contrast extremes in those regions (e.g. text over a photo).
  let tileSize=24,cols=Math.ceil(w/tileSize),rows=Math.ceil(h/tileSize),tiles=[];
@@ -98,6 +181,16 @@ function analyse(image,detail='all'){
  let mask=new Uint8Array(w*h);for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){let i=(y*w+x)*4,tile=tiles[Math.floor(y/tileSize)*cols+Math.floor(x/tileSize)],diff=Math.abs(d[i]-bg[0])+Math.abs(d[i+1]-bg[1])+Math.abs(d[i+2]-bg[2]);if(d[i+3]<=40)continue;if(!tile.photo){if(diff>95||lightRatio(grayscale[y*w+x],backgroundLight)>1.22)mask[y*w+x]=1;continue}let lum=(d[i]*77+d[i+1]*150+d[i+2]*29)/256;if(Math.abs(lum-tile.mean)<75)continue;let similar=0;for(let delta of [-4,4,-w*4,w*4])if(Math.abs(d[i]-d[i+delta])+Math.abs(d[i+1]-d[i+delta+1])+Math.abs(d[i+2]-d[i+delta+2])<45)similar++;if(similar>=2)mask[y*w+x]=1}
  // Replace the container's fill in the foreground mask with its local contents.
  for(let surface of surfaces){let {x0,y0,x1,y1,base,radius}=surface;for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){let dx=Math.max(x0+radius-x,0,x-(x1-radius)),dy=Math.max(y0+radius-y,0,y-(y1-radius));if(x-x0<3||x1-x<3||y-y0<3||y1-y<3||dx*dx+dy*dy>radius*radius){mask[y*w+x]=0;continue}let i=(y*w+x)*4,diff=Math.abs(d[i]-base[0])+Math.abs(d[i+1]-base[1])+Math.abs(d[i+2]-base[2]);mask[y*w+x]=d[i+3]>40&&diff>24?1:0}}
+ // Absorb the soft halo into the reconstructed card border.
+ for(const surface of surfaces.filter(s=>s.b.fillEnabled===false)){
+   const {x0,y0,x1,y1,base}=surface, margin=Math.max(3,Math.round(8*scale));
+   for(let y=Math.max(0,y0-margin);y<=Math.min(h-1,y1+margin);y++)
+     for(let x=Math.max(0,x0-margin);x<=Math.min(w-1,x1+margin);x++){
+       if(x>=x0&&x<=x1&&y>=y0&&y<=y1)continue;
+       const i=(y*w+x)*4,delta=Math.abs(d[i]-base[0])+Math.abs(d[i+1]-base[1])+Math.abs(d[i+2]-base[2]);
+       if(delta<90)mask[y*w+x]=0;
+     }
+ }
  // Find connected rectangular outlines before joining nearby text and icons.
  // Removing just the border pixels lets the interior be segmented independently.
  let outlines=[],visited=new Uint8Array(w*h),queue=new Int32Array(w*h);
@@ -223,7 +316,69 @@ for(let [id,key] of [['propColor','color'],['propStrokeColor','strokeColor']]){l
 $('propFill').onchange=e=>{let b=state.blocks.find(x=>x.id===selected);if(!b)return;snapshot();for(let item of state.blocks.filter(x=>multi.size?multi.has(x.id):x.id===selected))item.fillEnabled=e.target.checked;renderUI()};
 for(let [id,key] of [['background','background'],['defaultColor','defaultColor']])$(id).onchange=e=>{snapshot();state[key]=e.target.value};$('duration').onchange=e=>{snapshot();state.duration=+e.target.value;$('durationValue').textContent=state.duration.toFixed(1)};$('duration').oninput=e=>{$('durationValue').textContent=(+e.target.value).toFixed(1)};document.querySelectorAll('[data-animation]').forEach(el=>el.onclick=()=>{snapshot();state.animation=el.dataset.animation;startTime=performance.now();renderUI()});document.querySelectorAll('[data-view]').forEach(el=>el.onclick=()=>{view=el.dataset.view;renderUI()});$('undo').onclick=undo;$('redo').onclick=redo;$('zoomIn').onclick=()=>{if(state.width){zoom=Math.min(4,zoom*1.25);size()}};$('zoomOut').onclick=()=>{if(state.width){zoom=Math.max(.05,zoom/1.25);size()}};$('fit').onclick=fit;window.addEventListener('resize',()=>{if(state.width)fit()});$('export').onclick=exportFile;
 $('detail').onchange=e=>{if(state.detail!==e.target.value){snapshot();state.detail=e.target.value}};
+let ocrWorkerPromise=null;
+function loadOCR(){
+ if(ocrWorkerPromise)return ocrWorkerPromise;
+ ocrWorkerPromise=(async()=>{
+   if(!window.Tesseract)await new Promise((resolve,reject)=>{
+     const script=document.createElement('script');
+     script.src='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+     script.onload=resolve;script.onerror=()=>reject(new Error('OCR library unavailable'));
+     document.head.appendChild(script);
+   });
+   const worker=await Tesseract.createWorker(['rus','eng'],1,{
+     logger:message=>{
+       if(message.status==='recognizing text')
+         $('status').textContent='Распознавание текста: '+Math.round(message.progress*100)+'%';
+       else $('status').textContent='Загрузка OCR…';
+     }
+   });
+   await worker.setParameters({tessedit_pageseg_mode:'11'});
+   return worker;
+ })().catch(error=>{ocrWorkerPromise=null;throw error});
+ return ocrWorkerPromise;
+}
+$('recognizeText').onclick=async()=>{
+ if(!state.width||!img?.complete){toast('Сначала загрузите изображение');return}
+ const button=$('recognizeText'),image=img,initial=JSON.stringify(state);
+ button.disabled=true;$('status').textContent='Загрузка OCR…';
+ try{
+   const worker=await loadOCR();
+   const {data}=await worker.recognize(image,{}, {blocks:true});
+   if(img!==image||JSON.stringify(state)!==initial){
+     toast('Макет изменился. Запустите OCR ещё раз.');return;
+   }
+   const lines=(data.blocks||[]).flatMap(block=>block.paragraphs||[])
+     .flatMap(paragraph=>paragraph.lines||[])
+     .filter(line=>line.confidence>=35&&line.text.trim()&&line.bbox.x1>line.bbox.x0&&line.bbox.y1>line.bbox.y0);
+   if(!lines.length){toast('OCR не нашёл текст');return}
+   snapshot();
+   const boxes=lines.map(line=>{
+     const box=line.bbox,b=newBlock(box.x0,box.y0,box.x1-box.x0,box.y1-box.y0,'','text');
+     b.r=Math.round(b.h/2);
+     const existing=state.blocks.filter(item=>item.type==='text'&&item.x<box.x1&&item.x+item.w>box.x0&&item.y<box.y1&&item.y+item.h>box.y0);
+     if(existing.length)b.color=existing[0].color;
+     return b;
+   });
+   state.blocks=state.blocks.filter(item=>item.type!=='text'||!boxes.some(b=>{
+     const overlap=Math.max(0,Math.min(item.x+item.w,b.x+b.w)-Math.max(item.x,b.x))*Math.max(0,Math.min(item.y+item.h,b.y+b.h)-Math.max(item.y,b.y));
+     return overlap>=item.w*item.h*.5;
+   }));
+   for(const b of boxes){b.name='Text '+(state.blocks.length+1);state.blocks.push(b)}
+   selected=null;multi.clear();renderUI();toast('OCR нашёл строк: '+boxes.length);
+ }catch(error){console.error(error);toast('OCR недоступен. Проверьте подключение и попробуйте снова.')}
+ finally{button.disabled=false;$('status').textContent='Готов к работе'}
+};
 $('normalizeIcons').onclick=()=>{if(!state.width){toast('Сначала загрузите изображение');return}let before=JSON.stringify(state),count=normalizeNavigationIcons(state.blocks,state.width,state.height);if(!count){toast('Похожие значки в боковой панели не найдены');return}history.push(before);if(history.length>60)history.shift();future=[];updateButtons();renderUI();toast('Выровнено значков: '+count+' · Отменить: ⌘/Ctrl+Z')};
-$('regenerate').onclick=()=>{if(!state.width||!img?.complete){toast('Сначала загрузите изображение');return}let mode=$('detail').value;snapshot();state.detail=mode;state.blocks=analyse(img,mode);selected=null;multi.clear();renderUI();toast('Распознано областей: '+state.blocks.length+' · Отменить: ⌘/Ctrl+Z')};
+function regenerate(useContours=false){
+ if(!state.width||!img?.complete){toast('Сначала загрузите изображение');return}
+ const mode=$('detail').value;
+ snapshot();state.detail=mode;
+ state.blocks=analyse(img,mode,useContours);
+ selected=null;multi.clear();renderUI();
+ toast('Распознано областей: '+state.blocks.length+' · Отменить: ⌘/Ctrl+Z');
+}
+$('regenerate').onclick=()=>regenerate();
+$('recognizeContours').onclick=()=>regenerate(true);
 $('saveProject').onclick=()=>{if(!state.width){toast('Сначала загрузите изображение');return}download(new Blob([JSON.stringify({version:1,projectName:$('projectName').textContent,...state},null,2)],{type:'application/json'}),'skeleton-project.json')};$('openProject').onclick=()=>$('projectInput').click();$('projectInput').onchange=async e=>{let f=e.target.files[0];e.target.value='';if(!f)return;try{let p=JSON.parse(await f.text());if(p.version!==1||!Number.isInteger(p.width)||!Number.isInteger(p.height)||p.width<1||p.height<1||p.width>20000||p.height>20000||!Array.isArray(p.blocks)||typeof p.image!=='string'||!/^data:image\/(png|jpeg);base64,/.test(p.image)||!/^#[0-9a-f]{6}$/i.test(p.background)||!/^#[0-9a-f]{6}$/i.test(p.defaultColor)||!['shimmer','pulse','static'].includes(p.animation)||!Number.isFinite(p.duration)||p.duration<.1||p.duration>60||p.blocks.length>1000||p.blocks.some(b=>!b||typeof b.id!=='string'||typeof b.name!=='string'||!['x','y','w','h','r'].every(k=>Number.isFinite(b[k]))||b.w<=0||b.h<=0||b.r<0||!/^#[0-9a-f]{6}$/i.test(b.color)||(b.fillEnabled!==undefined&&typeof b.fillEnabled!=='boolean')||(b.strokeWidth!==undefined&&(!Number.isFinite(b.strokeWidth)||b.strokeWidth<0||b.strokeWidth>50))||(b.strokeColor!==undefined&&!/^#[0-9a-f]{6}$/i.test(b.strokeColor))))throw Error('Invalid project');let im=new Image();await new Promise((res,rej)=>{im.onload=res;im.onerror=rej;im.src=p.image});if(im.naturalWidth!==p.width||im.naturalHeight!==p.height)throw Error('Image size mismatch');snapshot();state={width:p.width,height:p.height,image:p.image,blocks:p.blocks,background:p.background,defaultColor:p.defaultColor,animation:p.animation,duration:p.duration,detail:['essential','all'].includes(p.detail)?p.detail:'essential'};img=im;selected=null;multi.clear();$('projectName').textContent=typeof p.projectName==='string'?p.projectName:'Project';fit();renderUI();toast('Проект открыт')}catch(err){toast('Неверный или повреждённый файл проекта')}};
 document.addEventListener('keydown',e=>{if(/INPUT|SELECT|TEXTAREA/.test(e.target.tagName))return;if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo()}else if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='y'){e.preventDefault();redo()}else if((e.key==='Delete'||e.key==='Backspace')&&selected){e.preventDefault();$('delete').click()}});updateButtons();
