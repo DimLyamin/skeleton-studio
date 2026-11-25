@@ -21,6 +21,45 @@ function relativeLight(r,g,b){
 }
 function lightRatio(a,b){return (Math.max(a,b)+.05)/(Math.min(a,b)+.05)}
 function neutralHex(level){return '#'+level.toString(16).padStart(2,'0').repeat(3)}
+// Inspect straight separators at source resolution before text grouping.
+function measureRules(image){
+ const rules=[],tile=document.createElement('canvas'),band=128;
+ for(const vertical of [false,true]){
+   const length=vertical?image.height:image.width, breadth=vertical?image.width:image.height;
+   tile.width=vertical?band+4:length;tile.height=vertical?length:band+4;
+   const g=tile.getContext('2d',{willReadFrequently:true});
+   for(let first=1;first<breadth-1;first+=band){
+     const span=Math.min(band+4,breadth-first+1);
+     const sx=vertical?first-1:0,sy=vertical?0:first-1;
+     const width=vertical?span:length,height=vertical?length:span;
+     g.fillStyle='#fff';g.fillRect(0,0,width,height);
+     g.drawImage(image,sx,sy,width,height,0,0,width,height);
+     const pixels=g.getImageData(0,0,width,height).data;
+     const along=vertical?width*4:4,across=vertical?4:width*4;
+     const diff=(a,b)=>Math.max(Math.abs(pixels[a]-pixels[b]),Math.abs(pixels[a+1]-pixels[b+1]),Math.abs(pixels[a+2]-pixels[b+2]));
+     for(let row=1;row<=band&&row<span-1;row++){
+       let start=0,thickness=0;
+       for(let x=0;x<=length;x++){
+         const i=row*across+x*along;
+         let n=0;
+         if(x<length&&diff(i,i-across)>=8){
+           let k=1;
+           while(k<=3&&row+k<span&&diff(i,i+k*across)<=4)k++;
+           if(k<=3&&row+k<span&&diff(i-across,i+k*across)<=5)n=k;
+         }
+         if(n===thickness&&(!n||diff(i,row*across+start*along)<=6))continue;
+         const run=x-start,pos=first+row-1;
+         if(thickness&&run>=Math.max(10,6*thickness)){
+           const b=vertical?newBlock(pos,start,thickness,run,'','line'):newBlock(start,pos,run,thickness,'','line');
+           b.r=0;rules.push(b);
+         }
+         start=x;thickness=n;
+       }
+     }
+   }
+ }
+ return rules;
+}
 function analyse(image,detail='all'){
  const scale=Math.min(1,800/Math.max(image.width,image.height)), w=Math.max(1,Math.round(image.width*scale)),h=Math.max(1,Math.round(image.height*scale));let c=document.createElement('canvas');c.width=w;c.height=h;let g=c.getContext('2d',{willReadFrequently:true});g.fillStyle="#fff";g.fillRect(0,0,w,h);g.drawImage(image,0,0,w,h);let d=g.getImageData(0,0,w,h).data;
  // Estimate the backdrop from area and perimeter support so a large inset card
@@ -53,10 +92,24 @@ function analyse(image,detail='all'){
  // Find connected rectangular outlines before joining nearby text and icons.
  // Removing just the border pixels lets the interior be segmented independently.
  let outlines=[],visited=new Uint8Array(w*h),queue=new Int32Array(w*h);
- for(let p=0;p<w*h;p++){if(!mask[p]||visited[p])continue;let head=0,tail=0;queue[tail++]=p;visited[p]=1;let x0=w,y0=h,x1=0,y1=0;while(head<tail){let v=queue[head++],x=v%w,y=(v/w)|0;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){if(!dx&&!dy)continue;let xx=x+dx,yy=y+dy;if(xx<0||xx>=w||yy<0||yy>=h)continue;let z=yy*w+xx;if(mask[z]&&!visited[z]){visited[z]=1;queue[tail++]=z}}}let bw=x1-x0+1,bh=y1-y0+1;if(bw<30||bh<20||bw>w*.98&&bh>h*.98)continue;let band=Math.max(2,Math.min(10,Math.round(Math.min(bw,bh)*.10))),top=0,bottom=0,left=0,right=0;for(let x=x0;x<=x1;x++){let t=false,b=false;for(let k=0;k<band;k++){t||=!!mask[(y0+k)*w+x];b||=!!mask[(y1-k)*w+x]}top+=t;bottom+=b}for(let y=y0;y<=y1;y++){let l=false,r=false;for(let k=0;k<band;k++){l||=!!mask[y*w+x0+k];r||=!!mask[y*w+x1-k]}left+=l;right+=r}if(top/bw<.68||bottom/bw<.68||left/bh<.68||right/bh<.68)continue;let borderPixels=0;for(let j=0;j<tail;j++){let v=queue[j],x=v%w,y=(v/w)|0;if(x<x0+band||x>x1-band||y<y0+band||y>y1-band){mask[v]=0;borderPixels++}}let b=newBlock(x0/scale,y0/scale,bw/scale,bh/scale,'Outline','outline');b.fillEnabled=false;b.strokeColor=state.defaultColor;b.strokeWidth=clamp(Math.round(borderPixels/(2*(bw+bh))/scale),1,50);b.r=Math.min(14,Math.round(b.h*.14));outlines.push(b)}
+ for(let p=0;p<w*h;p++){if(!mask[p]||visited[p])continue;let head=0,tail=0;queue[tail++]=p;visited[p]=1;let x0=w,y0=h,x1=0,y1=0;while(head<tail){let v=queue[head++],x=v%w,y=(v/w)|0;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){if(!dx&&!dy)continue;let xx=x+dx,yy=y+dy;if(xx<0||xx>=w||yy<0||yy>=h)continue;let z=yy*w+xx;if(mask[z]&&!visited[z]){visited[z]=1;queue[tail++]=z}}}let bw=x1-x0+1,bh=y1-y0+1;if(tail>bw*bh*.50||bw<30||bh<20||bw>w*.98&&bh>h*.98)continue;let band=Math.max(2,Math.min(10,Math.round(Math.min(bw,bh)*.10))),top=0,bottom=0,left=0,right=0;for(let x=x0;x<=x1;x++){let t=false,b=false;for(let k=0;k<band;k++){t||=!!mask[(y0+k)*w+x];b||=!!mask[(y1-k)*w+x]}top+=t;bottom+=b}for(let y=y0;y<=y1;y++){let l=false,r=false;for(let k=0;k<band;k++){l||=!!mask[y*w+x0+k];r||=!!mask[y*w+x1-k]}left+=l;right+=r}if(top/bw<.68||bottom/bw<.68||left/bh<.68||right/bh<.68)continue;let borderPixels=0;for(let j=0;j<tail;j++){let v=queue[j],x=v%w,y=(v/w)|0;if(x<x0+band||x>x1-band||y<y0+band||y>y1-band){mask[v]=0;borderPixels++}}let b=newBlock(x0/scale,y0/scale,bw/scale,bh/scale,'Outline','outline');b.fillEnabled=false;b.strokeColor=state.defaultColor;b.strokeWidth=clamp(Math.round(borderPixels/(2*(bw+bh))/scale),1,50);b.r=Math.min(14,Math.round(b.h*.14));outlines.push(b)}
+ // Outlines already carry their border. Keep standalone rules independent
+ // of nearby labels by removing their footprint before glyph dilation.
+ const borders=[...outlines,...surfaces.map(s=>s.b)];
+ const rules=measureRules(image).filter(line=>!borders.some(b=>{
+   const horizontal=line.w>line.h,tolerance=2/scale;
+   return horizontal?line.x>=b.x-tolerance&&line.x+line.w<=b.x+b.w+tolerance&&
+     Math.min(Math.abs(line.y-b.y),Math.abs(line.y+line.h-b.y-b.h))<tolerance:
+     line.y>=b.y-tolerance&&line.y+line.h<=b.y+b.h+tolerance&&
+     Math.min(Math.abs(line.x-b.x),Math.abs(line.x+line.w-b.x-b.w))<tolerance;
+ }));
+ for(const line of rules){
+   const right=Math.min(w,Math.ceil((line.x+line.w)*scale)),bottom=Math.min(h,Math.ceil((line.y+line.h)*scale));
+   for(let y=Math.floor(line.y*scale);y<bottom;y++)mask.fill(0,y*w+Math.floor(line.x*scale),y*w+right);
+ }
  // Horizontal dilation joins individual glyphs into lines; vertical dilation joins small gaps.
  let dil=new Uint8Array(w*h),rx=Math.max(2,Math.round(5*scale)),ry=Math.max(1,Math.round(1*scale));for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(mask[y*w+x])for(let yy=Math.max(0,y-ry);yy<=Math.min(h-1,y+ry);yy++)for(let xx=Math.max(0,x-rx);xx<=Math.min(w-1,x+rx);xx++)dil[yy*w+xx]=1;
- let seen=new Uint8Array(w*h),out=[...surfaces.map(s=>s.b),...outlines],q=new Int32Array(w*h);for(let p=0;p<w*h;p++){if(!dil[p]||seen[p])continue;let head=0,tail=0;q[tail++]=p;seen[p]=1;let x0=w,y0=h,x1=0,y1=0,count=0;while(head<tail){let n=q[head++],x=n%w,y=(n/w)|0;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);count+=mask[n];for(let z of [n-1,n+1,n-w,n+w]){if(z<0||z>=w*h||seen[z]||!dil[z]||(Math.abs(z%w-x)+Math.abs(((z/w)|0)-y)!==1))continue;seen[z]=1;q[tail++]=z}}let bw=x1-x0+1,bh=y1-y0+1;if(count<6||bw<4||bh<3||bw>w*.97&&bh>h*.97)continue;let text=bh<Math.max(26*scale,22)&&bw>bh*1.7, type=text?'text':(bw>55*scale&&bh>45*scale?'image':'block');x0=clamp(x0+rx,0,w-1);x1=clamp(x1-rx,x0+1,w-1);y0=clamp(y0+ry,0,h-1);y1=clamp(y1-ry,y0+1,h-1);let b=newBlock(x0/scale,y0/scale,Math.max(3,(x1-x0+1)/scale),Math.max(3,(y1-y0+1)/scale),'',type);b.r=type==='text'?Math.round(b.h/2):Math.min(8,Math.round(b.h/5));
+ let seen=new Uint8Array(w*h),out=[...surfaces.map(s=>s.b),...outlines],q=new Int32Array(w*h);for(let p=0;p<w*h;p++){if(!dil[p]||seen[p])continue;let head=0,tail=0;q[tail++]=p;seen[p]=1;let x0=w,y0=h,x1=0,y1=0,count=0;while(head<tail){let n=q[head++],x=n%w,y=(n/w)|0;if(mask[n]){x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);count++}for(let z of [n-1,n+1,n-w,n+w]){if(z<0||z>=w*h||seen[z]||!dil[z]||(Math.abs(z%w-x)+Math.abs(((z/w)|0)-y)!==1))continue;seen[z]=1;q[tail++]=z}}let bw=x1-x0+1,bh=y1-y0+1;if(count<4||bw>w*.97&&bh>h*.97)continue;let text=bh<Math.max(26*scale,22)&&bw>bh*1.7, type=text?'text':(bw>55*scale&&bh>45*scale?'image':'block');let b=newBlock(x0/scale,y0/scale,bw/scale,bh/scale,'',type);b.r=type==='text'?Math.round(b.h/2):Math.min(8,Math.round(b.h/5));
  // A hollow component is treated as an outline only when its four edges are present and its interior is mostly background.
  let cw=x1-x0+1,ch=y1-y0+1;if(cw>=16&&ch>=12){let edge=[0,0,0,0],tot=[0,0,0,0],inside=0,insideN=0,band=Math.max(2,Math.round(Math.min(cw,ch)*.12));for(let yy=y0;yy<=y1;yy++)for(let xx=x0;xx<=x1;xx++){let v=mask[yy*w+xx];if(yy<y0+band){tot[0]++;edge[0]+=v}if(yy>y1-band){tot[1]++;edge[1]+=v}if(xx<x0+band){tot[2]++;edge[2]+=v}if(xx>x1-band){tot[3]++;edge[3]+=v}if(xx>=x0+band&&xx<=x1-band&&yy>=y0+band&&yy<=y1-band){insideN++;inside+=v}}let ratios=edge.map((n,i)=>n/tot[i]);if(insideN&&inside/insideN<.10&&ratios.every(v=>v>.10)){b.type='outline';b.fillEnabled=false;b.strokeWidth=clamp(Math.round((count/(2*(cw+ch)))/scale),1,50);b.strokeColor=state.defaultColor;b.r=Math.min(8,Math.round(b.h/5))}}out.push(b)}
  // Separate a compact icon from a neighboring text line even when glyph dilation
@@ -75,7 +128,7 @@ function analyse(image,detail='all'){
  out=out.filter(b=>b.type!=='block'||!surfaces.some(({b:c})=>{let r=c.r;if(!r||b.w>r||b.h>r)return false;let nearLeft=b.x-c.x<r,nearRight=c.x+c.w-(b.x+b.w)<r,nearTop=b.y-c.y<r,nearBottom=c.y+c.h-(b.y+b.h)<r;return (nearLeft||nearRight)&&(nearTop||nearBottom)}));
  // Join nearby fragments on the same line inside a filled card (e.g. date and month).
  for(let surface of surfaces){let c=surface.b,changed=true;while(changed){changed=false;let inside=out.filter(b=>b!==c&&b.type!=='card'&&b.type!=='outline'&&b.type!=='image'&&b.x>c.x&&b.x+b.w<c.x+c.w&&b.y>c.y&&b.y+b.h<c.y+c.h).sort((a,b)=>a.x-b.x);outer:for(let i=0;i<inside.length;i++)for(let j=i+1;j<inside.length;j++){let a=inside[i],b=inside[j],gap=b.x-(a.x+a.w),overlap=Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y);if(gap<0||gap>Math.max(a.h,b.h)*.6||overlap<Math.min(a.h,b.h)*.7||a.w/a.h<1||b.w/b.h<1)continue;let y=Math.min(a.y,b.y),bottom=Math.max(a.y+a.h,b.y+b.h);a.w=b.x+b.w-a.x;a.y=y;a.h=bottom-y;a.type='text';a.r=Math.round(a.h/2);out.splice(out.indexOf(b),1);changed=true;break outer}}}
- out.sort((a,b)=>a.y-b.y||a.x-b.x);if(detail==='essential')out=simplifyBlocks(out,w/scale,h/scale);out=harmonizeCards(out);normalizeNavigationIcons(out,image.width,image.height);
+ out.sort((a,b)=>a.y-b.y||a.x-b.x);if(detail==='essential')out=simplifyBlocks(out,w/scale,h/scale);out=harmonizeCards(out);normalizeNavigationIcons(out,image.width,image.height);out.push(...rules);
  const lightPage=backgroundLight>=.179;
  const bgLevel=lightPage?Math.round(229+21*backgroundLight):Math.round(29+70*backgroundLight);
  state.background=neutralHex(bgLevel);
@@ -97,7 +150,7 @@ function analyse(image,detail='all'){
      const step=Math.max(1,Math.floor(Math.sqrt((right-left)*(bottom-top)/1800)));
      for(let y=top;y<bottom;y+=step)for(let x=left;x<right;x+=step){
        const pixel=y*w+x,r=lightRatio(grayscale[pixel],localLight);
-       if(r>1.04&&(mask[pixel]||block.type==='outline'))ratios.push(r);
+       if(r>1.04&&(mask[pixel]||block.type==='outline'||block.type==='line'))ratios.push(r);
      }
      ratios.sort((a,b)=>a-b);
      ratio=ratios[Math.floor(ratios.length*.7)]??1;
@@ -111,7 +164,7 @@ function analyse(image,detail='all'){
    if(block.strokeWidth)block.strokeColor=block.color;
  }
  // Draw each container before its children regardless of their top edges.
- out.sort((a,b)=>contains(a,b)?-1:contains(b,a)?1:(a.y-b.y||a.x-b.x));return out.slice(0,300).map((b,i)=>({...b,name:(b.type==='text'?'Text':b.type==='image'?'Image':b.type==='outline'?'Outline':b.type==='card'?'Card':'Block')+' '+(i+1)}));
+ out.sort((a,b)=>contains(a,b)?-1:contains(b,a)?1:(a.y-b.y||a.x-b.x));return out.slice(0,300).map((b,i)=>({...b,name:(b.type==='line'?'Line':b.type==='text'?'Text':b.type==='image'?'Image':b.type==='outline'?'Outline':b.type==='card'?'Card':'Block')+' '+(i+1)}));
 }
 // Unify nearby icon layers inside a sidebar without replacing the project.
 function normalizeNavigationIcons(blocks,width,height){let count=0;for(let c of blocks.filter(b=>b.type==='card'&&b.h>=height*.6&&b.w<=width*.3&&b.h>=b.w*2)){let icons=blocks.filter(b=>(b.type==='image'||b.type==='block')&&b.fillEnabled!==false&&b.x>=c.x&&b.x+b.w<c.x+c.w*.3&&b.y>c.y+c.h*.08&&b.y<c.y+c.h*.8&&b.w<c.w*.2&&b.w/b.h>=.75&&b.w/b.h<=1.33).sort((a,b)=>a.y-b.y),groups=[];for(let icon of icons){let group=groups[groups.length-1],prev=group?.[group.length-1];if(!prev||icon.y-prev.y>Math.max(icon.h,prev.h)*4||Math.abs(icon.w-prev.w)>Math.max(icon.w,prev.w)*.3||Math.abs((icon.x+icon.w/2)-(prev.x+prev.w/2))>Math.max(icon.w,prev.w)*.5)groups.push([icon]);else group.push(icon)}for(let group of groups){if(group.length<2)continue;let sizes=group.map(b=>Math.max(b.w,b.h)).sort((a,b)=>a-b),centers=group.map(b=>b.x+b.w/2).sort((a,b)=>a-b),side=Math.round(sizes[Math.floor(sizes.length/2)]),center=centers[Math.floor(centers.length/2)],radius=Math.round(side*.2);for(let b of group){let cy=b.y+b.h/2;b.x=Math.round(center-side/2);b.y=Math.round(cy-side/2);b.w=b.h=side;b.r=radius;count++}}}return count}
@@ -122,7 +175,7 @@ function harmonizeCards(blocks){
  let role=b=>b.type==='text'||b.type==='block'&&b.w>b.h*1.1?'text':b.type==='image'?'image':b.type;
  let children=card=>result.filter(b=>b!==card&&b.type!=='outline'&&b.type!=='card'&&b.x+b.w/2>card.x&&b.x+b.w/2<card.x+card.w&&b.y+b.h/2>card.y&&b.y+b.h/2<card.y+card.h&&!cards.some(inner=>inner!==card&&inner.w<card.w&&inner.h<card.h&&b.x+b.w/2>inner.x&&b.x+b.w/2<inner.x+inner.w&&b.y+b.h/2>inner.y&&b.y+b.h/2<inner.y+inner.h));
  let entries=cards.map(card=>({card,items:children(card)})).filter(e=>e.items.length>0);let groups=[];
- function match(a,b){if(Math.abs(a.card.w-b.card.w)>Math.max(a.card.w,b.card.w)*.08||Math.abs(a.card.h-b.card.h)>Math.max(a.card.h,b.card.h)*.08||a.items.length!==b.items.length)return null;let slots=[],used=new Set();for(let item of a.items){let ax=(item.x-a.card.x)/a.card.w,ay=(item.y-a.card.y)/a.card.h,best=null,dist=Infinity;for(let c of b.items){if(used.has(c)||role(item)!==role(c))continue;let d=Math.hypot(ax-(c.x-b.card.x)/b.card.w,ay-(c.y-b.card.y)/b.card.h);if(d<dist){best=c;dist=d}}if(!best||dist>.10)return null;used.add(best);slots.push(best)}return slots}
+ function match(a,b){if(Math.abs(a.card.w-b.card.w)>Math.max(a.card.w,b.card.w)*.08||Math.abs(a.card.h-b.card.h)>Math.max(a.card.h,b.card.h)*.08||a.items.length!==b.items.length)return null;let slots=[],used=new Set();for(let item of a.items){let ax=(item.x-a.card.x)/a.card.w,ay=(item.y-a.card.y)/a.card.h,best=null,dist=Infinity;for(let c of b.items){if(used.has(c)||role(item)!==role(c)||Math.min(item.h,c.h)<Math.max(item.h,c.h)*.75||Math.min(item.w,c.w)<Math.max(item.w,c.w)*.55)continue;let d=Math.hypot(ax-(c.x-b.card.x)/b.card.w,ay-(c.y-b.card.y)/b.card.h);if(d<dist){best=c;dist=d}}if(!best||dist>.10)return null;used.add(best);slots.push(best)}return slots}
  for(let e of entries){let matched=false;for(let group of groups){let slots=match(group[0],e);if(slots){group.push({...e,slots});matched=true;break}}if(!matched)groups.push([{...e,slots:e.items}])}
  let median=arr=>{let v=arr.sort((a,b)=>a-b),m=Math.floor(v.length/2);return v.length%2?v[m]:(v[m-1]+v[m])/2};
  for(let group of groups){if(group.length<2)continue;for(let i=0;i<group[0].slots.length;i++){let samples=group.map(e=>({b:e.slots[i],c:e.card})),xs=samples.map(({b,c})=>(b.x-c.x)/c.w),ys=samples.map(({b,c})=>(b.y-c.y)/c.h),ws=samples.map(({b,c})=>b.w/c.w),hs=samples.map(({b,c})=>b.h/c.h),rs=samples.map(({b,c})=>b.r/Math.min(c.w,c.h));let x=median(xs),y=median(ys),w=ws.reduce((a,b)=>a+b,0)/ws.length,h=median(hs),r=median(rs);for(let {b,c} of samples){b.x=Math.round(c.x+x*c.w);b.y=Math.round(c.y+y*c.h);b.w=Math.max(1,Math.min(Math.round(w*c.w),Math.round(c.x+c.w-b.x)));b.h=Math.max(1,Math.min(Math.round(h*c.h),Math.round(c.y+c.h-b.y)));b.r=Math.min(Math.round(r*Math.min(c.w,c.h)),Math.floor(b.w/2),Math.floor(b.h/2))}}}
